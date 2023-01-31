@@ -6,9 +6,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from .errors.pages import Page404
 from .react.router import SloRouter
-from .react.tools import uri_checker
 from .rpc import RPC, Event
-
+from slobypy.react.tools import *
 if TYPE_CHECKING:
     from .react.component import Component
 
@@ -28,7 +27,7 @@ class SlApp:
     """
 
     # Use list to prevent name conflicts
-    _components: list[dict[str, Any]] = []
+    _components: list[dict[str, Any]] = []  # (uri, component, source, metadata, static)
     only_components: list[type[Component]] = []  # registered components(only)
     rpc: RPC | None = None
 
@@ -74,16 +73,22 @@ class SlApp:
         """
         if isinstance(uri, SloRouter):
             uri = uri.route
-        # TODO: Add URI checking regex
+
+        component_data = {
+            "uri": uri_checker(uri),
+            "component": component,
+            "source_path": Path(source),
+            "metadata": metadata,
+            "static": static,
+        }
+
         cls._components.append(
-            {
-                "uri": uri_checker(uri),
-                "component": component,
-                "source_path": Path(source),
-                "metadata": metadata,
-                "static": static,
-            }
+
+               component_data
         )
+
+        SloDebugHandler.add_json(base_key="registered_components", sub_key=uri_checker(uri), add_item=component_data)  # add the registered_component to the handler
+
         cls.only_components.append(component)
 
     @classmethod
