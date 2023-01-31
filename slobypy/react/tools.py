@@ -60,7 +60,7 @@ class SloDebugHandler:
         if cls.path:
             return True
 
-        cls._create_file(cls.path)
+        # cls._create_file(cls.path)
         return False
 
     @classmethod
@@ -71,10 +71,10 @@ class SloDebugHandler:
     @classmethod
     def set_path(cls, path: Path):
         """Used to set the path for the handler json file"""
-        if not Path(path).exists():
-            cls.path = path
-        else:
-            raise AlreadyExistsException(f"{path} is already exists")
+        # if not Path(path).exists():
+        #     cls.path = path
+        # else:
+        #     raise AlreadyExistsException(f"{path} is already exists")
 
     @classmethod
     def add_json(cls, base_key: str, sub_key: str, add_item: dict) -> None:
@@ -85,10 +85,10 @@ class SloDebugHandler:
         - sub_key : component_route
         - add_item: component_data -> dict (uri, component, source_path, metadata, static)
        """
-       json_data = cls._load()
-
-       json_data[base_key][sub_key] = str(add_item)
-       cls._dump(json_data)
+       # json_data = cls._load()
+       #
+       # json_data[base_key][sub_key] = str(add_item)
+       # cls._dump(json_data)
 
     @classmethod
     def delete_json(cls, base_key: str, sub_key: str) -> None:

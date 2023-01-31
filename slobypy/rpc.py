@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import queue
+import nest_asyncio
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Thread
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine
 
 import websockets.exceptions
@@ -17,6 +21,7 @@ from websockets.server import WebSocketServer, serve
 from .errors.pages import Page404
 from .react.component import AppComponent
 from .react.design import Design
+from .threads import QueuedThread
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -28,6 +33,8 @@ __all__: tuple[str, ...] = (
     "RPC",
     "Event",
 )
+
+nest_asyncio.apply()  # Patch asyncio
 
 
 class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
@@ -44,11 +51,11 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
     CURRENT_VERSION = "0.A1"
 
     def __init__(
-        self,
-        app: type[SlApp],
-        host: str = "localhost",
-        port: int = 8765,
-        **kwargs: Any,
+            self,
+            app: type[SlApp],
+            host: str = "localhost",
+            port: int = 8765,
+            **kwargs: Any,
     ) -> None:
         self.css_preprocessor: Callable[[], Awaitable[Path]] | None = None
 
@@ -70,6 +77,9 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
 
         self.ws: WebSocketServer | None = None  # pylint: disable=invalid-name
         self.conn: list[dict[str, Any]] = []
+        self.queue: queue.Queue = queue.Queue()
+        self.queue_thread: Thread | None = None
+        self.threads: list[QueuedThread] = []
 
         for hook in self.hooks:
             hook.rpc = self
@@ -104,11 +114,15 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
         for task in preprocessor_tasks:
             futures.append(asyncio.create_task(task))
 
+        self.queue_thread = Thread(target=self.watch_queue_sync, args=(asyncio.get_event_loop(),))
+        self.queue_thread.start()
+
         await asyncio.gather(
             *self.tasks, *futures, self.create_ws(self._handle_ws, host, port)
         )
         pending = asyncio.all_tasks()
         self.event_loop.run_until_complete(asyncio.gather(*pending))
+        self.queue_thread.join()
 
     async def send_hook(self, name: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -168,10 +182,10 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
             self.console.log("[black on red] ERROR [/]", data)
 
     async def create_ws(
-        self,
-        ws_handler: Callable[[WebSocketServerProtocol], Awaitable[Any]],
-        host: str = "localhost",
-        port: int = 8765,
+            self,
+            ws_handler: Callable[[WebSocketServerProtocol], Awaitable[Any]],
+            host: str = "localhost",
+            port: int = 8765,
     ) -> None:
         """
         Creates a websocket connection to the React frontend
@@ -230,7 +244,7 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
             )
 
     async def handle_event(
-        self, conn: WebSocketServerProtocol, data: dict[str, Any]
+            self, conn: WebSocketServerProtocol, data: dict[str, Any]
     ) -> None:
         """
         Handles the event sent from the React frontend
@@ -338,7 +352,7 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
             )
 
     async def identify(
-        self, conn: WebSocketServerProtocol, data: dict[str, Any]
+            self, conn: WebSocketServerProtocol, data: dict[str, Any]
     ) -> None:
         """
         Identifies the React frontend's websocket
@@ -399,7 +413,7 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
         )
 
     async def new_shard(
-        self, conn: WebSocketServerProtocol, data: dict[str, Any]
+            self, conn: WebSocketServerProtocol, data: dict[str, Any]
     ) -> None:
         """
         Handles a new shard request from the React frontend
@@ -424,8 +438,22 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
 
         await self.render_shard(conn, data)
 
+    def watch_queue_sync(self, loop: asyncio.AbstractEventLoop) -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.watch_queue())
+
+    async def watch_queue(self) -> None:
+        """Watches the queue for new items"""
+        while True:
+            data = self.queue.get()
+            await self.update_shard_data(data["conn"], data["shard_id"], data["data"])
+            await self.log(
+                f"Rendered shard #{data['shard_id']} on connection #{getattr(data['conn'], '_sloby_id')}, route: {data['route']}"
+            )
+            self.queue.task_done()
+
     async def render_shard(
-        self, conn: WebSocketServerProtocol, data: dict[str, Any]
+            self, conn: WebSocketServerProtocol, data: dict[str, Any]
     ) -> None:
         """
         Renders a shard to the React frontend
@@ -438,23 +466,18 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
         - None
         """
 
-        start_time = datetime.now()
         conn_id = getattr(conn, "_sloby_id")
         self.conn[conn_id - 1]["shards"][str(data["id"])]["route"] = data["route"]
         self.conn[conn_id - 1]["shards"][str(data["id"])]["last_render"] = data
 
-        await self.update_shard_data(
-            conn, data["id"], await self.get_route(data["route"]), data["route"]
-        )
-
-        await self.send_hook("on_render_shard", conn, data)
-        await self.log(
-            f"Rendered shard #{data['id']} on connection #{conn_id}, route: {data['route']} in "
-            f"{int(round((datetime.now() - start_time).total_seconds(), 3) * 1000)}ms"
-        )
+        await self.get_route(data["route"], {
+            "conn": conn,
+            "shard_id": data["id"],
+            "route": data["route"],
+        })
 
     async def update_shard_data(
-        self, conn: WebSocketServerProtocol, shard_id: int, html: str, shard_route: str
+            self, conn: WebSocketServerProtocol, shard_id: int, html: str
     ) -> None:
         """
         Updates the html data of a shard
@@ -474,9 +497,7 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
                 "type": "update_shard_data",
                 "data": {
                     "id": shard_id,
-                    "html": html
-                    if self._check_shard_render_alone(shard_route)
-                    else Page404(route=shard_route).show(),
+                    "html": html,
                 },
                 "sequence": random.randint(1000, 9999),
             },
@@ -494,21 +515,23 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
         - None
         """
 
-    async def get_route(self, route: str) -> str:
+    async def get_route(self, route: str, metadata: dict) -> None:
         """
         Gets the html of a route
 
         ### Arguments
         - route (str): The route to get the html of
+        - metadata (dict): The metadata to pass to the route during threaded render
 
         ### Returns
-        - str: The full html data of the route
+        - None
         """
 
-        return self.app._render(route=route)  # type: ignore  # pylint: disable=protected-access
+        self.threads.append(self.app._render(route=route, metadata=metadata,
+                                             data_queue=self.queue))  # type: ignore  # pylint: disable=protected-access
 
     async def reload_all_css(
-        self, *args: Any, **kwargs: Any  # pylint: disable=unused-argument
+            self, *args: Any, **kwargs: Any  # pylint: disable=unused-argument
     ) -> list[None]:
         """
         Reloads all css on all connections
@@ -557,17 +580,9 @@ class RPC:  # pylint: disable=too-many-public-methods,too-many-instance-attribut
         """
         if self.css_preprocessor is None:
             # When no preprocessor, fallback to default
-            return "\n".join([scss_data["scss_class"].render() for scss_data in Design._REGISTERED_CLASSES])  # type: ignore  # pylint: disable=protected-access
+            return "\n".join([scss_data["scss_class"].render() for scss_data in
+                              Design._REGISTERED_CLASSES])  # type: ignore  # pylint: disable=protected-access
         return (await self.css_preprocessor()).read_text()
-
-    def _check_shard_render_alone(self, shard_route: str) -> bool:
-        if AppComponent._components:  # type: ignore  # pylint: disable=protected-access
-            for app_component in AppComponent._components:  # type: ignore  # pylint: disable=protected-access
-
-                if app_component["uri"] == shard_route:
-                    return True
-            return False
-        return True
 
     async def _check_app_hot_reload(self, shard_route: str, routes: list[str]) -> bool:
         if AppComponent._components:  # type: ignore  # pylint: disable=protected-access

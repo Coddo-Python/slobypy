@@ -60,7 +60,7 @@ app.get('*', async (req, res) => {
             html_data.route = req.url;
             html_hooks.push(function hook(message) {
                 if (message.type === "update_shard_data") {
-                    console.log("hook")
+                    console.log("new hook")
                     if (message.data.id === ips.indexOf(req.ip) + 1) {
                         res.send(css_link + js_link + message.data.html.replace("className", "class"));
                     }

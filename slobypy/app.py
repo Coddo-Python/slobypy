@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import inspect
+
 from pathlib import Path
+from queue import Queue
 from typing import TYPE_CHECKING, Any, Callable
 
 from .errors.pages import Page404
 from .react.router import SloRouter
 from .rpc import RPC, Event
-from slobypy.react.tools import *
+from .threads import QueuedThread
+from .react.tools import *
+
 if TYPE_CHECKING:
     from .react.component import Component
 
@@ -33,7 +37,7 @@ class SlApp:
 
     @classmethod
     def component(
-        cls, uri: str | SloRouter, static: bool = False
+            cls, uri: str | SloRouter, static: bool = False
     ) -> Callable[[type[Component]], type[Component]]:
         """
         This decorator is used to register a component to the app.
@@ -55,12 +59,12 @@ class SlApp:
 
     @classmethod
     def add(  # pylint: disable=too-many-arguments
-        cls,
-        uri: str | SloRouter,
-        component: type[Component],
-        source: str,
-        metadata: dict[str, Any],
-        static: bool = False,
+            cls,
+            uri: str | SloRouter,
+            component: type[Component],
+            source: str,
+            metadata: dict[str, Any],
+            static: bool = False,
     ) -> None:
         """
         This method is used to add a component to the app.
@@ -84,10 +88,11 @@ class SlApp:
 
         cls._components.append(
 
-               component_data
+            component_data
         )
 
-        SloDebugHandler.add_json(base_key="registered_components", sub_key=uri_checker(uri), add_item=component_data)  # add the registered_component to the handler
+        SloDebugHandler.add_json(base_key="registered_components", sub_key=uri_checker(uri),
+                                 add_item=component_data)  # add the registered_component to the handler
 
         cls.only_components.append(component)
 
@@ -125,27 +130,31 @@ class SlApp:
     # Todo:
     #   - Extend the render with more informal component data.
     @classmethod
-    def _render(cls, obj: Component | None = None, route: str | None = None) -> str:
+    def _render(cls, obj: Component | None = None, route: str | None = None, metadata: dict[str, Any] | None = None,
+                data_queue: Queue | None = None) -> QueuedThread:
         """
         This method is used to render the app to HTML.
 
         ### Arguments
         - obj (Any): The specific object to render
         - route (str): The route to render
+        - data_queue (Queue): The queue to use to send data to the frontend
 
         ### Returns
-        - str: The HTML string
+        - QueuedThread: The thread used to render the object/route
         """
+        metadata = metadata or {}
         if obj:
-            # Don't mount as this *should* be only run on a re-render
-            return obj.render()
-
-        if route:
+            thread = QueuedThread(data_queue, metadata, target=obj.render)
+        elif route:
             for component in cls._components:
                 if component["uri"] == route:
-                    return component["component"]().render()
-            return Page404(route=route).show()
+                    thread = QueuedThread(data_queue, metadata, target=component["component"]().render)
+                    break
+            else:
+                thread = QueuedThread(data_queue, metadata, target=Page404().render)
+        else:
+            raise ValueError("No object or route provided to render")
 
-        return "".join(
-            component["component"]().render() for component in cls._components
-        )
+        thread.start()
+        return thread

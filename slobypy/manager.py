@@ -374,7 +374,7 @@ class SloDash:
                     await self.rpc.hot_reload_routes(routes)
 
     # noinspection PyMethodMayBeStatic
-    async def on_start(self, port):
+    async def on_start(self, host, port):
         """Hook that is called when the app starts"""
         self.watch_callbacks = [
             {
